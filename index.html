@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Jan collecting Caitlin’s Love</title>
+<style>
+html,body{margin:0;background:#0b0b0b;font-family: "Trebuchet MS", "Comic Sans MS", system-ui, sans-serif;}
+#wrap{display:flex;align-items:center;justify-content:center;min-height:100vh}
+canvas{background:#000;max-width:100%;height:auto;border:6px solid #222;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+/* comic UI panel */
+.hud{
+position:absolute; left:20px; top:18px; padding:12px 16px;
+background:rgba(255,255,255,.85); border:4px solid #000; border-radius:12px;
+font-weight:900; font-size:18px; letter-spacing:.5px; text-transform:uppercase;
+box-shadow:4px 4px 0 #000;
+}
+.hud .big{font-size:22px}
+/* start overlay (for user gesture to enable audio) */
+#start{
+position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+background:rgba(0,0,0,.85); color:#fff; z-index:10; text-align:center; padding:20px;
+}
+#start button{
+font-size:20px; font-weight:800; padding:14px 22px; border-radius:10px; border:0;
+background:#ffd44d; box-shadow:4px 4px 0 #000; cursor:pointer;
+}
+#start h1{font-size:28px;margin:0 0 12px}
+/* win banner */
+#winMsg{
+position:absolute; inset:0; display:none; align-items:center; justify-content:center; flex-direction:column;
+color:#fff; text-shadow:4px 4px 0 #000, 0 0 18px #ff66cc; font-weight:900; letter-spacing:1px;
+}
+#winMsg .title{font-size:64px; margin-bottom:12px}
+#winMsg button{margin-top:12px; font-size:18px; font-weight:800; padding:10px 16px; border-radius:10px; border:0;
+background:#ff90e8; box-shadow:4px 4px 0 #000; cursor:pointer;}
+/* mute hint */
+#hint{position:absolute; right:16px; top:16px; color:#fff; opacity:.85; font-size:14px;}
+</style>
+</head>
+<body>
+<div id="wrap">
+<canvas id="game" width="1280" height="720"></canvas>
+<div class="hud" id="hud">Caitlin’s Love: <span class="big" id="score">0</span> / 20</div>
+<div id="winMsg">
+<div class="title">I LOVE YOU 💖</div>
+<div>Overflowing love unlocked!</div>
+<button id="again">Play again</button>
+</div>
+<div id="hint">Press <b>M</b> to mute / unmute</div>
+</div>
+
+<!-- Start overlay to unlock audio -->
+<div id="start">
+<div>
+<h1>Jan collecting Caitlin’s Love</h1>
+<p>Move Jan with <b>← →</b> or <b>A D</b>.<br/>Catch the falling hearts!<br/>Click Chewie to roll over, then rub/click him while belly-up to make him wag 🐶</p>
+<button id="startBtn">Start</button>
+</div>
+</div>
+
+<script>
+(() => {
+"use strict";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+// --- Assets ---
+const imgBg = new Image(); imgBg.src = "background.png";
+const imgHeart = new Image(); imgHeart.src = "heart.png";
+
+const janSheet = new Image(); janSheet.src = "jan_sprite.png"; // 3 frames, 512x512 each
+const JAN_F = 3, JAN_FW = 512, JAN_FH = 512;
+
+const chewieSheet = new Image(); chewieSheet.src = "chewie_sprite.png"; // 4 frames, 512x512 each
+const CHW_F = 4, CHW_FW = 512, CHW_FH = 512;
+
+// Audio (WAV is included; you can add .mp3/.ogg if you convert later)
+const bgm = new Audio(); bgm.src = "loopB.wav"; bgm.loop = true; bgm.volume = 0.5;
+const sCatch = new Audio("catch.wav");
+const sWin = new Audio("win.wav");
+
+let muted = false;
+function playSnd(aud){ if(!muted){ try { aud.currentTime = 0; aud.play(); } catch(e){} } }
+
+// --- Game state ---
+const keys = {};
+window.addEventListener("keydown", (e)=>{ keys[e.key.toLowerCase()] = true; if(e.key.toLowerCase()==='m'){ muted=!muted; bgm.muted = muted; }});
+window.addEventListener("keyup", (e)=>{ keys[e.key.toLowerCase()] = false; });
+
+const W = canvas.width, H = canvas.height;
+
+const jan = {
+x: W*0.5, y: H-210, w: 160, h: 160,
+frame: 0, frameTime: 0,
+speed: 5
+};
+
+const chewie = {
+x: 120, y: H-230, w: 180, h: 180,
+frame: 0, timer: 0, state: "idle", // "idle","roll","belly","wag"
+rubCount: 0, rubbing: false
+};
+
+let hearts = [];
+let score = 0, target = 20;
+let lastSpawn = 0;
+let win = false;
+const hudScore = document.getElementById("score");
+
+// pointer / rub detection for Chewie
+let pointerDown = false, pointerX=0, pointerY=0;
+canvas.addEventListener("pointerdown", e => {
+pointerDown = true;
+const p = getPos(e);
+pointerX = p.x; pointerY = p.y;
+if(hitChewie(p.x,p.y)){
+if(chewie.state === "idle"){ // start the trick
+chewie.state = "roll"; chewie.frame = 0; chewie.timer = 0; chewie.rubCount = 0;
+} else if(chewie.state === "belly"){
+chewie.rubbing = true; // start rubbing
+chewie.rubCount++;
+if(chewie.rubCount > 5){
+chewie.state = "wag"; chewie.timer = 0; chewie.frame = 2; // wag-left start
+}
+}
+}
+});
+canvas.addEventListener("pointermove", e => {
+if(!pointerDown) return;
+const p = getPos(e);
+if(chewie.state === "belly" && hitChewie(p.x,p.y)){
+chewie.rubbing = true;
+// count "rubs" when you move across belly area
+if(Math.abs(p.x-pointerX) + Math.abs(p.y-pointerY) > 20) {
+chewie.rubCount++;
+pointerX = p.x; pointerY = p.y;
+if(chewie.rubCount > 5){
+chewie.state = "wag"; chewie.timer = 0; chewie.frame = 2;
+}
+}
+}
+});
+window.addEventListener("pointerup", ()=>{ pointerDown=false; chewie.rubbing=false; });
+
+function hitChewie(x,y){ return x>=chewie.x && x<=chewie.x+chewie.w && y>=chewie.y && y<=chewie.y+chewie.h; }
+function getPos(e){ const r=canvas.getBoundingClientRect(); return { x:(e.clientX-r.left)*(canvas.width/r.width), y:(e.clientY-r.top)*(canvas.height/r.height) }; }
+
+// --- Hearts ---
+function spawnHeart(){
+hearts.push({
+x: Math.random()*(W-90)+45,
+y: -80,
+w: 64, h: 64,
+vy: 2 + Math.random()*2.5,
+rot: Math.random()*Math.PI,
+vr: (Math.random()*0.02-0.01)
+});
+}
+
+// --- Loop helpers ---
+let last = 0;
+function loop(ts){
+const dt = (ts-last)||16; last = ts;
+update(dt);
+draw();
+requestAnimationFrame(loop);
+}
+
+function update(dt){
+if(win) return;
+
+// Jan movement
+let moving = false;
+if(keys['arrowleft'] || keys['a']){ jan.x -= jan.speed; moving = true; }
+if(keys['arrowright']|| keys['d']){ jan.x += jan.speed; moving = true; }
+jan.x = Math.max(0, Math.min(W-jan.w, jan.x));
+jan.frameTime += dt;
+if(moving){
+if(jan.frameTime > 120){ // cycle walk1 / walk2
+jan.frame = jan.frame===1 ? 2 : 1;
+jan.frameTime = 0;
+}
+}else{
+jan.frame = 0; // standing
+}
+
+// Chewie state machine
+chewie.timer += dt;
+switch(chewie.state){
+case "roll":
+if(chewie.timer > 140){ chewie.frame = 1; chewie.state="belly"; chewie.timer=0; } // reached belly frame
+break;
+case "belly":
+// staying belly-up, waiting for rubs; small wiggle
+if(chewie.timer % 300 < 150) chewie.frame = 1; else chewie.frame = 0;
+break;
+case "wag":
+if(chewie.timer > 80){ chewie.frame = (chewie.frame===2?3:2); chewie.timer = 0; }
+// after a short celebration, return to idle
+if(chewie.rubCount > 5 && chewie.rubCount < 100) chewie.rubCount++;
+if(chewie.rubCount >= 40){ chewie.state="idle"; chewie.frame=0; chewie.rubCount=0; }
+break;
+default: // idle bob
+if(chewie.timer > 600){ chewie.timer = 0; }
+break;
+}
+
+// Hearts spawn
+lastSpawn += dt;
+if(lastSpawn > 650){ // every ~0.65s on average
+lastSpawn = 0;
+if(Math.random() < 0.85) spawnHeart();
+}
+
+// Hearts fall + collect
+for(let i=hearts.length-1;i>=0;i--){
+const h = hearts[i];
+h.y += h.vy; h.rot += h.vr;
+if(h.y > H+100){ hearts.splice(i,1); continue; }
+// collision with Jan (simple AABB)
+if( rectsOverlap(jan.x,jan.y,jan.w,jan.h, h.x-32,h.y-32,h.w,h.h) ){
+hearts.splice(i,1);
+score++; hudScore.textContent = score;
+playSnd(sCatch);
+if(score >= target){ triggerWin(); }
+}
+}
+}
+
+function rectsOverlap(ax,ay,aw,ah, bx,by,bw,bh){
+return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
+}
+
+function draw(){
+// background
+if(imgBg.complete) ctx.drawImage(imgBg, 0, 0, canvas.width, canvas.height);
+
+// Jan
+drawSprite(janSheet, JAN_FW, JAN_FH, jan.frame, jan.x, jan.y, jan.w, jan.h);
+
+// Chewie
+drawSprite(chewieSheet, CHW_FW, CHW_FH, chewie.frame, chewie.x, chewie.y, chewie.w, chewie.h);
+
+// Hearts
+hearts.forEach(h=>{
+ctx.save();
+ctx.translate(h.x, h.y);
+ctx.rotate(h.rot);
+ctx.drawImage(imgHeart, -h.w/2, -h.h/2, h.w, h.h);
+ctx.restore();
+});
+
+// Footer shadow bar for depth
+ctx.fillStyle = "rgba(0,0,0,.15)";
+ctx.fillRect(0, H-40, W, 40);
+}
+
+function drawSprite(sheet, fw, fh, frame, dx,dy,dw,dh){
+const sx = frame * fw;
+ctx.drawImage(sheet, sx, 0, fw, fh, dx, dy, dw, dh);
+}
+
+// --- Win state and effects ---
+const winLayer = document.getElementById("winMsg");
+const btnAgain = document.getElementById("again");
+
+function triggerWin(){
+win = true;
+playSnd(sWin);
+bgm.pause();
+winLayer.style.display = "flex";
+// tiny heart burst
+for(let i=0;i<40;i++){
+setTimeout(()=>{ spawnHeart(); hearts[hearts.length-1].y = Math.random()*H*0.5+100; }, i*40);
+}
+}
+btnAgain.addEventListener("click", ()=>{
+score = 0; hudScore.textContent = score; win = false;
+winLayer.style.display = "none";
+hearts = [];
+bgm.currentTime = 0; if(!muted) bgm.play();
+});
+
+// --- Start overlay to unlock audio ---
+const start = document.getElementById("start");
+document.getElementById("startBtn").addEventListener("click", ()=>{
+start.style.display = "none";
+try { bgm.currentTime = 0; if(!muted) bgm.play(); } catch(e){}
+requestAnimationFrame(loop);
+});
+
+// Safety: if assets load fast & user presses Enter
+window.addEventListener("keydown", e=>{ if(e.key==="Enter" && start.style.display!=="none") document.getElementById("startBtn").click(); });
+
+})();
+</script>
+</body>
+</html>
